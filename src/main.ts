@@ -1,29 +1,37 @@
 import 'maplibre-gl/dist/maplibre-gl.css';
+import './style.css';
 import maplibregl from 'maplibre-gl';
 import * as pmtiles from 'pmtiles';
 
-// Keep PMTiles registered for later layers
 const protocol = new pmtiles.Protocol();
 (maplibregl as any).addProtocol('pmtiles', protocol.tile);
 
-// If you’re using OS Vector Tiles via env var:
-const osStyle = `https://api.os.uk/maps/vector/v1/vts/resources/styles?srs=3857&key=${import.meta.env.VITE_OS_API_KEY}`;
+// OS Vector Tile API (Web Mercator) – requires your VITE_OS_API_KEY
+const osStyle =
+  `https://api.os.uk/maps/vector/v1/vts/resources/styles?srs=3857&key=${import.meta.env.VITE_OS_API_KEY}`;
 
 const map = new maplibregl.Map({
   container: 'map',
-  // EITHER use the OS style:
-  style: osStyle,
-  // OR keep your dev raster style here instead of osStyle.
-
-  center: [-1.5, 53.8] as [number, number],
-  zoom: 6,
-
-  // ✅ Pass options object, not `true`
+  style: osStyle,                 // or your dev raster style
   attributionControl: { compact: true }
 });
 
-// ✅ Actually use `map` so TS stops complaining
+// Great Britain bounds (W,S & E,N)
+const GB_BOUNDS: [[number, number], [number, number]] = [
+  [-8.7, 49.8],
+  [ 1.9, 60.9]
+];
+
+map.on('load', () => {
+  // Fill the screen neatly with GB and avoid any halo
+  map.fitBounds(GB_BOUNDS, { padding: { top: 0, right: 0, bottom: 0, left: 0 }, animate: false });
+  map.setMaxBounds(GB_BOUNDS); // optional, stops panning into the Atlantic
+  map.resize();                 // belt-and-braces after initial layout
+});
+
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+
 
 
 // Option B (alternative): if TS complains, disable above and use an explicit control
