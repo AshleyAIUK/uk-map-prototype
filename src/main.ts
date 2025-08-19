@@ -1,86 +1,93 @@
+// src/main.ts
 import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
 import maplibregl from 'maplibre-gl';
 import * as pmtiles from 'pmtiles';
 
+// 0) Register the PMTiles protocol (so 'pmtiles://...' URLs work)
 const protocol = new pmtiles.Protocol();
 (maplibregl as any).addProtocol('pmtiles', protocol.tile);
 
-// OS Vector Tile API (Web Mercator) – requires your VITE_OS_API_KEY
-const osStyle =
-  `https://api.os.uk/maps/vector/v1/vts/resources/styles?srs=3857&key=${import.meta.env.VITE_OS_API_KEY}`;
+// 1) OS basemap if the key exists; otherwise a safe raster fallback
+const osKey = import.meta.env.VITE_OS_API_KEY as string | undefined;
+const osStyle = osKey
+  ? `https://api.os.uk/maps/vector/v1/vts/resources/styles?srs=3857&key=${osKey}`
+  : null;
 
+const rasterFallbackStyle = {
+  version: 8 as const,
+  sources: {
+    osm: { type: 'raster' as const, tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'], tileSize: 256 }
+  },
+  layers: [{ id: 'osm', type: 'raster' as const, source: 'osm' }]
+};
+
+const styleToUse = osStyle ?? rasterFallbackStyle;
+
+// 2) Create the map with a sensible initial view (avoid “wallpaper world”)
 const map = new maplibregl.Map({
   container: 'map',
-  style: osStyle,                 // or your dev raster style
+  style: styleToUse,
+  center: [-1.8, 54.5],
+  zoom: 5.5,
+  renderWorldCopies: false,
   attributionControl: { compact: true }
 });
 
-// Great Britain bounds (W,S & E,N)
-const GB_BOUNDS: [[number, number], [number, number]] = [
-  [-8.7, 49.8],
-  [ 1.9, 60.9]
-];
-
-map.on('load', () => {
-  // Fill the screen neatly with GB and avoid any halo
-  map.fitBounds(GB_BOUNDS, { padding: { top: 0, right: 0, bottom: 0, left: 0 }, animate: false });
-  map.setMaxBounds(GB_BOUNDS); // optional, stops panning into the Atlantic
-  map.resize(); 
-                // belt-and-braces after initial layout
-});
-
-map.on('load', () => {
-  // 1) Source
-  map.addSource('lad', {
-    type: 'geojson',
-    data: '/lad_2024_bgc.geojson' // served from Vite 'public' at site root
-  });
-
-  // 2) Fill layer (soft tint)
-  map.addLayer({
-    id: 'lad-fill',
-    type: 'fill',
-    source: 'lad',
-    paint: {
-      'fill-color': '#e6f2ff',
-      'fill-opacity': 0.35
-    }
-  });
-
-  // 3) Outline layer
-  map.addLayer({
-    id: 'lad-line',
-    type: 'line',
-    source: 'lad',
-    paint: {
-      'line-color': '#2f5597',
-      'line-width': 1
-    }
-  });
-
-  // 4) Cursor + popup on click
-  map.on('mouseenter', 'lad-fill', () => map.getCanvas().style.cursor = 'pointer');
-  map.on('mouseleave', 'lad-fill', () => map.getCanvas().style.cursor = '');
-
-  map.on('click', 'lad-fill', (e) => {
-    const f = e.features?.[0];
-    if (!f) return;
-    const p = f.properties as Record<string, any>;
-    const name = p.LAD24NM ?? 'Unknown name';
-    const code = p.LAD24CD ?? 'Unknown code';
-    new maplibregl.Popup()
-      .setLngLat(e.lngLat)
-      .setHTML(`<strong>${name}</strong><br/>Code: ${code}`)
-      .addTo(map);
-  });
-});
-
-
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
+// 3) Add the Local Authority layer from PMTiles (vector tiles)
+map.once('style.load', async () => {
+  try {
+    // Set this to your actual PMTiles location:
+    // - For a quick test if you upload to /public: 'pmtiles://https://YOUR-APP.vercel.app/lad_2024.pmtiles'
+    // - For S3/R2/CDN: 'pmtiles://https://YOUR-BUCKET/lad_2024.pmtiles'
+    const pmtilesUrl = 'pmtiles://https://YOUR-HOST/lad_2024.pmtiles';
+
+    // Add the vector tile source
+    if (!map.getSource('lad')) {
+      map.addSource('lad', { type: 'vector', url: pmtilesUrl });
+    }
+
+    // Draw outline then fill (note the 'source-layer' = layer name you set during creation, e.g. -nln lad)
+    if (!map.getLayer('lad-line')) {
+      map.addLayer({
+        id: 'lad-line',
+        type: 'line',
+        source: 'lad',
+        'source-layer': 'lad',
+        paint: { 'line-color': '#ff0050', 'line-width': 2 }
+      });
+    }
+
+    if (!map.getLayer('lad-fill')) {
+      map.addLayer({
+        id: 'lad-fill',
+        type: 'fill',
+        source: 'lad',
+        'source-layer': 'lad',
+        paint: { 'fill-color': '#ffd54f', 'fill-opacity': 0.18 }
+      }, 'lad-line'); // insert under the outline
+    }
+
+    // Click popup (properties come through from your tiles)
+    map.on('click', 'lad-fill', (e) => {
+      const f = e.features?.[0]; if (!f) return;
+      const p = f.properties as Record<string, any>;
+      new maplibregl.Popup()
+        .setLngLat(e.lngLat)
+        .setHTML(`<strong>${p.LAD24NM ?? 'Unknown'}</strong><br/>Code: ${p.LAD24CD ?? 'Unknown'}`)
+        .addTo(map);
+    });
+
+    map.on('mouseenter', 'lad-fill', () => (map.getCanvas().style.cursor = 'pointer'));
+    map.on('mouseleave', 'lad-fill', () => (map.getCanvas().style.cursor = ''));
+  } catch (err) {
+    console.error('Failed to load LAD PMTiles:', err);
+  }
+});
+
+// Helpful errors in the console (especially on Vercel)
+map.on('error', (e) => console.error('Map error:', (e as any).error || e));
 
 
-
-// Option B (alternative): if TS complains, disable above and use an explicit control
-// map.addControl(new maplibregl.AttributionControl({ compact: true }));
