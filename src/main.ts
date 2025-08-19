@@ -27,16 +27,28 @@ const styleToUse = osStyle ?? rasterFallbackStyle;
 // 2) Create the map with a sensible initial view (avoid “wallpaper world”)
 const map = new maplibregl.Map({
   container: 'map',
-  style: styleToUse,
-  center: [-1.8, 54.5],
-  zoom: 5.5,
-  renderWorldCopies: false,
+  style: styleToUse,            // your OS style or raster fallback
+  center: [-1.8, 54.5],         // UK-ish centre
+  zoom: 5.5,                    // avoids the “tiny world tile” at zoom 0
+  renderWorldCopies: false,     // no repeated worlds at the edges
+  bearing: 0,
+  pitch: 0,
   attributionControl: { compact: true }
 });
 
+
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
-// 3) Add the Local Authority layer from PMTiles (vector tiles)
+map.once('style.load', () => {
+  const GB_BOUNDS: [[number, number], [number, number]] = [
+    [-8.7, 49.8],  // SW
+    [ 1.9, 60.9]   // NE
+  ];
+  map.fitBounds(GB_BOUNDS, { padding: 8, animate: false });
+});
+
+/ 3) Add the Local Authority layer from PMTiles (vector tiles)
+
 map.once('style.load', async () => {
   try {
     // Set this to your actual PMTiles location:
@@ -91,5 +103,4 @@ map.once('style.load', async () => {
 
 // Helpful errors in the console (especially on Vercel)
 map.on('error', (e) => console.error('Map error:', (e as any).error || e));
-
 
