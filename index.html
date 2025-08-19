@@ -5,14 +5,13 @@
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Map prototype</title>
     <style>
-      /* Make the map truly full-bleed */
-      html, body { height: 100%; margin: 0; }
-      #map { position: fixed; inset: 0; }
+      html, body { height: 100%; margin: 0; }  /* kill the default 8px body margin */
+      #map { position: fixed; inset: 0; }       /* pin map to all edges */
     </style>
   </head>
   <body>
     <div id="map"></div>
-    <!-- Vite loads your TS entry from /src; keep this exactly as-is -->
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
+
