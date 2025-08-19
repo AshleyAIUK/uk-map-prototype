@@ -1,3 +1,5 @@
-html, body { height: 100%; margin: 0; }
-#map { position: fixed; inset: 0; }
+/* Minimal reset: nothing else */
+html, body { height: 100%; width: 100%; margin: 0; padding: 0; }
+#map { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+
 
