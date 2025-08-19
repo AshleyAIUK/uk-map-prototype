@@ -42,7 +42,9 @@ map.once('style.load', async () => {
     // Set this to your actual PMTiles location:
     // - For a quick test if you upload to /public: 'pmtiles://https://YOUR-APP.vercel.app/lad_2024.pmtiles'
     // - For S3/R2/CDN: 'pmtiles://https://YOUR-BUCKET/lad_2024.pmtiles'
-    const pmtilesUrl = 'pmtiles://https://YOUR-HOST/lad_2024.pmtiles';
+    // use the current site origin for dev (localhost) and prod (vercel.app)
+    const pmtilesUrl = `pmtiles://${window.location.origin}/lad_2024.pmtiles`;
+
 
     // Add the vector tile source
     if (!map.getSource('lad')) {
