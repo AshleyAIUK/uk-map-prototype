@@ -47,7 +47,7 @@ map.once('style.load', () => {
   map.fitBounds(GB_BOUNDS, { padding: 8, animate: false });
 });
 
-/ 3) Add the Local Authority layer from PMTiles (vector tiles)
+// 3) Add the Local Authority layer from PMTiles (vector tiles)
 
 map.once('style.load', async () => {
   try {
