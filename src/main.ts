@@ -1,156 +1,92 @@
-// src/main.ts
-import 'maplibre-gl/dist/maplibre-gl.css';
-import './style.css';
-import maplibregl from 'maplibre-gl';
-import * as pmtiles from 'pmtiles';
+// ===== C) Colour postcode districts by your CSV groups (supports exact and prefix*) =====
+try {
+  const resp = await fetch('/postcode_groups.csv');
+  if (!resp.ok) {
+    console.warn('postcode_groups.csv not found; using default fill colour');
+  } else {
+    const txt = await resp.text();
+    const lines = txt.trim().split(/\r?\n/);
+    lines.shift(); // header
 
-// -- PMTiles protocol so `pmtiles://https://…` works
-const protocol = new pmtiles.Protocol();
-(maplibregl as any).addProtocol('pmtiles', protocol.tile);
+    // Build two lookups: exact codes, and prefixes (ending with '*')
+    const exact: Record<string, string> = {};
+    const prefixes: Array<{prefix: string; gid: string}> = [];
+    const groupToLabel: Record<string, string> = {};
 
-// -- Basemap: OS Vector Tiles if key is present, else OSM raster fallback
-const osKey = import.meta.env.VITE_OS_API_KEY as string | undefined;
-const osStyle = osKey
-  ? `https://api.os.uk/maps/vector/v1/vts/resources/styles?srs=3857&key=${osKey}`
-  : null;
+    for (const line of lines) {
+      const [rawCode, gidRaw, labelRaw] = line.split(',');
+      if (!rawCode || !gidRaw) continue;
+      const code = rawCode.trim();
+      const gid = gidRaw.trim();
+      const label = (labelRaw ?? '').trim();
+      if (label) groupToLabel[gid] = label;
 
-const rasterFallbackStyle = {
-  version: 8 as const,
-  sources: {
-    osm: {
-      type: 'raster' as const,
-      tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-      tileSize: 256
-    }
-  },
-  layers: [{ id: 'osm', type: 'raster' as const, source: 'osm' }]
-};
-
-const styleToUse = osStyle ?? rasterFallbackStyle;
-
-// -- Create the map with a sensible initial camera (avoid “tiny world tile”)
-const map = new maplibregl.Map({
-  container: 'map',
-  style: styleToUse,
-  center: [-1.8, 54.5],   // UK-ish centre
-  zoom: 5.5,              // not zoom 0
-  renderWorldCopies: false,
-  bearing: 0,
-  pitch: 0,
-  attributionControl: { compact: true }
-});
-
-// expose for DevTools
-;(window as any).map = map;
-
-map.addControl(new maplibregl.NavigationControl(), 'top-right');
-
-// -- When the style is ready, fit GB and add overlays
-map.on('style.load', async () => {
-  // Fit Great Britain
-  const GB_BOUNDS: [[number, number], [number, number]] = [
-    [-8.7, 49.8], // SW
-    [ 1.9, 60.9]  // NE
-  ];
-  map.fitBounds(GB_BOUNDS, { padding: 8, animate: false });
-
-  // ======  A) Local Authority overlay from PMTiles  ======
-  const ladUrl = `pmtiles://${window.location.origin}/lad_2024.pmtiles`;
-
-  try {
-    if (!map.getSource('lad')) {
-      map.addSource('lad', { type: 'vector', url: ladUrl });
+      if (code.endsWith('*')) {
+        prefixes.push({ prefix: code.slice(0, -1), gid });
+      } else {
+        exact[code] = gid;
+      }
     }
 
-    if (!map.getLayer('lad-line')) {
-      map.addLayer({
-        id: 'lad-line',
-        type: 'line',
-        source: 'lad',
-        'source-layer': 'lad', // must match internal layer name
-        paint: { 'line-color': '#ff0050', 'line-width': 2 }
-      });
+    // Palette per group id (extend to taste)
+    const palette: Record<string, string> = {
+      A: '#4e79a7', // blue
+      B: '#f28e2b', // orange
+      C: '#e15759',
+      D: '#76b7b2',
+      E: '#59a14f',
+      F: '#edc948',
+      G: '#b07aa1',
+      H: '#ff9da7',
+    };
+
+    const codeProp = 'name'; // property holding the district code in your GeoJSON
+
+    // 1) Exact matches: build a 'match' expression code -> colour
+    const exactExpr: any[] = ['match', ['get', codeProp]];
+    for (const [code, gid] of Object.entries(exact)) {
+      exactExpr.push(code, palette[gid] ?? '#cccccc');
+    }
+    exactExpr.push('__NO_MATCH__'); // sentinel if no exact match
+
+    // 2) Prefix matches: build a chained 'case' expression
+    // e.g. if name starts with 'WC2' then colourA; else if starts with 'EC1' then colourB; else default
+    const prefixExpr: any[] = ['case'];
+    for (const { prefix, gid } of prefixes) {
+      prefixExpr.push(
+        ['==', ['slice', ['get', codeProp], 0, prefix.length], prefix],
+        palette[gid] ?? '#cccccc'
+      );
+    }
+    prefixExpr.push('#dddddd'); // default if no prefix matched
+
+    // 3) Combine: if exactExpr produced a colour, use it; else fall back to prefixExpr
+    // We do this by checking whether exactExpr returned our sentinel.
+    const combinedExpr: any[] = [
+      'case',
+      ['!=', exactExpr, '__NO_MATCH__'],
+      exactExpr,
+      prefixExpr
+    ];
+
+    // Apply to all postcode fill layers
+    for (const id of pcdFillLayerIds) {
+      map.setPaintProperty(id, 'fill-color', combinedExpr);
     }
 
-    if (!map.getLayer('lad-fill')) {
-      map.addLayer({
-        id: 'lad-fill',
-        type: 'fill',
-        source: 'lad',
-        'source-layer': 'lad',
-        paint: { 'fill-color': '#ffd54f', 'fill-opacity': 0.18 }
-      }, 'lad-line'); // insert beneath the outline
-    }
-
-    // LAD interaction
-    map.on('mouseenter', 'lad-fill', () => (map.getCanvas().style.cursor = 'pointer'));
-    map.on('mouseleave', 'lad-fill', () => (map.getCanvas().style.cursor = ''));
-    map.on('click', 'lad-fill', (e) => {
-      const f = e.features?.[0]; if (!f) return;
-      const p = f.properties as Record<string, any>;
-      new maplibregl.Popup()
-        .setLngLat(e.lngLat)
-        .setHTML(`<strong>${p.LAD24NM ?? 'Unknown'}</strong><br/>Code: ${p.LAD24CD ?? 'Unknown'}`)
-        .addTo(map);
-    });
-  } catch (err) {
-    console.error('Failed to load LAD PMTiles:', err);
+    // Tiny legend (optional)
+    const legend = document.getElementById('pc-legend') ?? document.createElement('div');
+    legend.id = 'pc-legend';
+    legend.innerHTML = `
+      <div class="panel__title">Postcode groups</div>
+      <div class="panel__content">
+        ${Object.entries(groupToLabel).map(([gid, label]) => {
+          const colour = palette[gid] ?? '#ccc';
+          return `<div class="legend-item"><span class="swatch" style="background:${colour}"></span>${gid}: ${label}</div>`;
+        }).join('') || '<p class="muted">No groups yet</p>'}
+      </div>`;
+    if (!legend.parentElement) document.body.appendChild(legend);
   }
-
-  // ======  B) London postcode districts overlay from GeoJSON  ======
-  // Place these files in: /public/postcodes/E.geojson, EC.geojson, N.geojson, NW.geojson, SE.geojson, SW.geojson, W.geojson, WC.geojson
-  const areas = ['E','EC','N','NW','SE','SW','W','WC'] as const;
-  const pcdFillLayerIds: string[] = [];
-
-  for (const a of areas) {
-    const srcId = `pcd_${a}`;
-    const url = `/postcodes/${a}.geojson`; // Vite serves /public at the site root
-
-    if (!map.getSource(srcId)) {
-      map.addSource(srcId, { type: 'geojson', data: url });
-    }
-
-    // Fill (insert under LAD outline so LAD borders remain prominent)
-    const fillId = `${srcId}-fill`;
-    if (!map.getLayer(fillId)) {
-      map.addLayer({
-        id: fillId,
-        type: 'fill',
-        source: srcId,
-        paint: { 'fill-color': '#eeeeee', 'fill-opacity': 0.45 }
-      }, 'lad-line');
-    }
-    pcdFillLayerIds.push(fillId);
-
-    // Outline
-    const lineId = `${srcId}-line`;
-    if (!map.getLayer(lineId)) {
-      map.addLayer({
-        id: lineId,
-        type: 'line',
-        source: srcId,
-        paint: { 'line-color': '#555', 'line-width': 0.6 }
-      });
-    }
-  }
-
-  // Simple popup on click: show the district code (property name is usually 'name', e.g. 'SW1')
-  map.on('click', (e) => {
-    const f = map.queryRenderedFeatures(e.point, { layers: pcdFillLayerIds })[0];
-    if (!f) return;
-    const code = (f.properties as any)?.name ?? '(unknown)';
-    new maplibregl.Popup().setLngLat(e.lngLat).setHTML(`<strong>${code}</strong>`).addTo(map);
-  });
-});
-
-// Ensure canvas matches container after first paint + on resize
-map.once('load', () => {
-  map.resize();
-  requestAnimationFrame(() => map.resize());
-});
-window.addEventListener('resize', () => map.resize());
-
-// Helpful error logging
-map.on('error', (e) => console.error('Map error:', (e as any).error || e));
-
-
+} catch (e) {
+  console.error('Failed to load postcode_groups.csv', e);
+}

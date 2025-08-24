@@ -1,5 +1,15 @@
 /* Minimal reset: nothing else */
 html, body { height: 100%; width: 100%; margin: 0; padding: 0; }
 #map { position: fixed; inset: 0; width: 100vw; height: 100vh; }
+#pc-legend{
+  position: fixed; top: 12px; left: 12px; z-index: 10;
+  background: rgba(255,255,255,0.95);
+  border-radius: 12px; padding: 10px 12px; box-shadow: 0 2px 18px rgba(0,0,0,0.12);
+  min-width: 220px; font: 14px/1.4 system-ui, Segoe UI, Roboto, Arial;
+}
+#pc-legend .panel__title{ font-weight:700; margin-bottom:6px; }
+#pc-legend .legend-item{ display:flex; align-items:center; gap:8px; margin:4px 0; }
+#pc-legend .swatch{ width:14px; height:14px; border-radius:3px; border:1px solid rgba(0,0,0,.2); display:inline-block; }
+#pc-legend .muted{ color:#666; }
 
 
