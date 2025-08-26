@@ -149,7 +149,7 @@ map.on('style.load', async () => {
         tokens
       });
 
-      tidToMetrics[id] = { title: `T${id}`, region: region ?? '', pop: Number(pop), biz: Number(biz), income };
+      tidToMetrics[id] = { title: `Territory${id}`, region: region ?? '', pop: Number(pop), biz: Number(biz), income };
       tidToTokens[id] = tokens.slice();
 
       for (const code of exacts) codeToTidExact[code] = id;
@@ -250,14 +250,14 @@ map.on('style.load', async () => {
         const tokens = (tidToTokens[tid] || []);
         const shown = tokens.slice(0, 10);
         const more = tokens.length - shown.length;
-        const pcdLine = `PCDs: ${shown.join(', ')}${more > 0 ? ` +${more} more` : ''}`;
+        const postcodesLine = `Postcodes: ${shown.join(', ')}${more > 0 ? ` +${more} more` : ''}`;
 
         popup.setLngLat(e.lngLat).setHTML(
           `<strong>${m.title}</strong><br>
            Region: ${m.region}<br>
-           ${pcdLine}<br>
-           Pop: ${nf.format(m.pop)}<br>
-           Biz: ${nf.format(m.biz)}<br>
+           ${postcodesLine}<br>
+           Population: ${nf.format(m.pop)}<br>
+           Number of Businesses: ${nf.format(m.biz)}<br>
            Income: ${m.income}`
         ).addTo(map);
       });
