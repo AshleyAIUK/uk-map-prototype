@@ -1,4 +1,4 @@
-"territory_id,region,postcode_prefixes,estimated_population,indicative_business_count,average_household_income, Status"
+territory_id,region,postcode_prefixes,estimated_population,indicative_business_count,average_household_income, Status
 "1,Greater London,E1+|E2+|E3+|E14*,320000,18500,48000, Available"
 "2,Greater London,E4+|E5+|E8+|E9+ ,300000,13500,44000, Available"
 "3,Greater London,E6+|E7+|E12*|E13*|E16* ,310000,14000,40000, Available"
