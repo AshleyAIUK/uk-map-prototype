@@ -3,7 +3,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
 import maplibregl from 'maplibre-gl';
 
-// ---- OSM raster basemap (glyphs harmless even without labels) ----
+// ---- OSM raster basemap (glyphs harmless) ----
 const rasterStyle = {
   version: 8 as const,
   glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
@@ -17,7 +17,6 @@ const rasterStyle = {
   layers: [{ id: 'osm', type: 'raster' as const, source: 'osm' }]
 };
 
-// ---- Create map ----
 const map = new maplibregl.Map({
   container: 'map',
   style: rasterStyle,
@@ -27,137 +26,180 @@ const map = new maplibregl.Map({
   attributionControl: { compact: true }
 });
 
-// Expose for Console debugging
 ;(window as any).map = map;
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
-// ---- Helpers/const ----
 const nf = new Intl.NumberFormat('en-GB');
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const AtoZ = LETTERS.split('');
 
+// Utility to fetch JSON (returns undefined on 404)
+async function fetchJson<T = any>(url: string): Promise<T | undefined> {
+  try {
+    const r = await fetch(url);
+    if (!r.ok) return undefined;
+    return await r.json();
+  } catch { return undefined; }
+}
+
 map.on('style.load', async () => {
-  // Fit Great Britain
   const GB_BOUNDS: [[number, number], [number, number]] = [[-8.7, 49.8], [1.9, 60.9]];
   map.fitBounds(GB_BOUNDS, { padding: 8, animate: false });
 
-  // ---- Load postcode district GeoJSONs ----
-  const areas = ['E','EC','N','NW','SE','SW','W','WC'] as const;
-  const codeProp = 'name'; // e.g. "SE22", "W1B", "EC1A"
+  // ---- 1) Load postcode areas dynamically via manifest ----
+  const manifest = await fetchJson<string[]>('/postcodes/_index.json');
+  // Sensible fallback if manifest is missing
+  const areas = manifest && manifest.length > 0
+    ? manifest
+    : ['E','EC','N','NW','SE','SW','W','WC'];
+
+  const codeProp = 'name'; // district code property in your GeoJSONs
   const pcdFillLayerIds: string[] = [];
 
   for (const a of areas) {
     const srcId = `pcd_${a}`;
     const url = `/postcodes/${a}.geojson`;
-    if (!map.getSource(srcId)) {
-      map.addSource(srcId, { type: 'geojson', data: url });
-    }
+    try {
+      if (!map.getSource(srcId)) {
+        map.addSource(srcId, { type: 'geojson', data: url });
+      }
+      const fillId = `${srcId}-fill`;
+      if (!map.getLayer(fillId)) {
+        map.addLayer({
+          id: fillId,
+          type: 'fill',
+          source: srcId,
+          paint: { 'fill-color': '#cccccc', 'fill-opacity': 0.68 }
+        });
+      }
+      pcdFillLayerIds.push(fillId);
 
-    const fillId = `${srcId}-fill`;
-    if (!map.getLayer(fillId)) {
-      map.addLayer({
-        id: fillId,
-        type: 'fill',
-        source: srcId,
-        paint: { 'fill-color': '#cccccc', 'fill-opacity': 0.68 }
-      });
-    }
-    pcdFillLayerIds.push(fillId);
+      const lineId = `${srcId}-line`;
+      if (!map.getLayer(lineId)) {
+        map.addLayer({
+          id: lineId,
+          type: 'line',
+          source: srcId,
+          paint: { 'line-color': '#555', 'line-width': 0.6 }
+        });
+      }
 
-    const lineId = `${srcId}-line`;
-    if (!map.getLayer(lineId)) {
-      map.addLayer({
-        id: lineId,
-        type: 'line',
-        source: srcId,
-        paint: { 'line-color': '#555', 'line-width': 0.6 }
-      });
+      map.on('mouseenter', fillId, () => (map.getCanvas().style.cursor = 'pointer'));
+      map.on('mouseleave', fillId, () => (map.getCanvas().style.cursor = ''));
+    } catch (e) {
+      console.warn(`Skipped postcode area ${a}:`, e);
     }
-
-    // UX: pointer cursor over districts
-    map.on('mouseenter', fillId, () => (map.getCanvas().style.cursor = 'pointer'));
-    map.on('mouseleave', fillId, () => (map.getCanvas().style.cursor = ''));
   }
 
-  // ---- Territories: colour by CSV; popup on click ----
+  // ---- 2) Territories: parse CSV (with status), colour + opacity, popup on click ----
   try {
     const resp = await fetch('/territories.csv');
-    if (!resp.ok) {
-      console.warn('territories.csv not found; keeping default grey.');
-      wireCodeOnlyPopups();
-      return;
-    }
+    if (!resp.ok) { console.warn('territories.csv not found; keeping default grey.'); wireCodeOnlyPopups(); return; }
 
     const text = await resp.text();
-    const lines = text.trim().split(/\r?\n/);
-    lines.shift(); // header
+    const lines = text.split(/\r?\n/).filter(Boolean);
+    if (lines.length === 0) { wireCodeOnlyPopups(); return; }
+
+    // Header-aware parsing (tolerant of column order; expects required fields exist)
+    const header = lines.shift()!;
+    const cols = header.split(',').map(h => h.trim().toLowerCase());
+
+    const idx = (names: string[], fallback = -1) =>
+      names.map(n => cols.indexOf(n)).find(i => i >= 0) ?? fallback;
+
+    const iId   = idx(['territory_id','id']);
+    const iReg  = idx(['region']);
+    const iPfx  = idx(['postcode_prefixes','postcodes','prefixes']);
+    const iPop  = idx(['estimated_population','population','pop']);
+    const iBiz  = idx(['indicative_business_count','businesses','biz','business_count']);
+    const iInc  = idx(['average_household_income','income','avg_income']);
+    const iStat = idx(['status']);
+
+    if (iId < 0 || iPfx < 0) {
+      console.error('CSV is missing required columns (territory_id and postcode_prefixes).');
+      wireCodeOnlyPopups(); return;
+    }
 
     type Terr = {
       id: string; region: string;
-      exacts: string[];           // exact districts (SE22, EC1A…)
-      letterPrefixes: string[];   // tokens like W1+ (stored as 'W1')
-      anyPrefixes: string[];      // tokens like EC1* (stored as 'EC1')
+      exacts: string[]; letterPrefixes: string[]; anyPrefixes: string[];
       pop: number; biz: number; income: string;
-      tokens: string[];           // original tokens for display
+      tokens: string[]; status: 'available'|'taken'|string;
     };
 
     const territories: Terr[] = [];
     const codeToTidExact: Record<string, string> = {};
     const letterPrefixToTid: Array<{ prefix: string; tid: string }> = [];
     const anyPrefixToTid: Array<{ prefix: string; tid: string }> = [];
-    const tidToMetrics: Record<string, { title: string; region: string; pop: number; biz: number; income: string }> = {};
+    const tidToMetrics: Record<string, { title: string; region: string; pop: number; biz: number; income: string; status: string }> = {};
     const tidToTokens: Record<string, string[]> = {};
+    const tidToStatus: Record<string, string> = {};
 
     for (const raw of lines) {
-      if (!raw.trim()) continue;
-      // CSV: territory_id,region,postcode_prefixes,estimated_population,indicative_business_count,average_household_income
       const parts = raw.split(',');
-      const [id, region, prefixesFieldRaw, pop, biz] = [
-        parts[0]?.trim(),
-        parts[1]?.trim(),
-        parts[2]?.trim(),
-        parts[3]?.trim(),
-        parts[4]?.trim()
-      ];
-      const income = parts.slice(5).join(',').trim(); // allow "£65,000"
+      const id  = (parts[iId]  ?? '').trim();
+      if (!id) continue;
 
-      if (!id || !prefixesFieldRaw) continue;
+      const region = (parts[iReg] ?? '').trim();
+      const pfxRaw = (parts[iPfx] ?? '').trim();
 
-      // Handle quoted token list, split by |
-      const prefixesField = prefixesFieldRaw.replace(/^"(.*)"$/, '$1');
-      const tokens = prefixesField.split('|').map(s => s.trim().toUpperCase()).filter(Boolean);
+      // Because income often has commas, treat "everything after iBiz" as tail, then split last for status
+      const popStr = iPop >= 0 ? (parts[iPop] ?? '').trim() : '';
+      const bizStr = iBiz >= 0 ? (parts[iBiz] ?? '').trim() : '';
+      let incomeAndStatus = '';
+      if (iInc >= 0) {
+        incomeAndStatus = parts.slice(iInc).join(',').trim();
+      } else if (iBiz >= 0) {
+        incomeAndStatus = parts.slice(iBiz + 1).join(',').trim();
+      }
+
+      let income = '';
+      let status = (iStat >= 0 ? (parts[iStat] ?? '').trim() : '');
+      if (!status && incomeAndStatus) {
+        const lastComma = incomeAndStatus.lastIndexOf(',');
+        if (iStat >= 0 && lastComma >= 0) {
+          income = incomeAndStatus.slice(0, lastComma).trim();
+          status = incomeAndStatus.slice(lastComma + 1).trim();
+        } else {
+          income = incomeAndStatus;
+        }
+      } else if (!income && iInc >= 0) {
+        income = (parts[iInc] ?? '').trim();
+      }
+
+      if (!status) status = 'available';
+      const statusNorm = status.toLowerCase();
+
+      // Strip optional quotes around tokens and split on |
+      const pfx = pfxRaw.replace(/^"(.*)"$/, '$1');
+      const tokens = pfx.split('|').map(s => s.trim().toUpperCase()).filter(Boolean);
 
       const exacts: string[] = [];
       const letterPrefixes: string[] = [];
       const anyPrefixes: string[] = [];
 
       for (const tok of tokens) {
-        if (tok.endsWith('+'))       letterPrefixes.push(tok.slice(0, -1)); // 'W1+'=> 'W1'
-        else if (tok.endsWith('*'))  anyPrefixes.push(tok.slice(0, -1));    // 'EC1*'=>'EC1'
-        else                         exacts.push(tok);                       // exact district
+        if (tok.endsWith('+'))       letterPrefixes.push(tok.slice(0, -1));  // 'W1+'=> 'W1' (letters-only incl. base)
+        else if (tok.endsWith('*'))  anyPrefixes.push(tok.slice(0, -1));     // 'EC1*'=>'EC1' (any continuation)
+        else                         exacts.push(tok);                        // exact district
       }
 
-      territories.push({
-        id,
-        region: region ?? '',
-        exacts,
-        letterPrefixes,
-        anyPrefixes,
-        pop: Number(pop),
-        biz: Number(biz),
-        income,
-        tokens
-      });
+      const t: Terr = {
+        id, region, exacts, letterPrefixes, anyPrefixes,
+        pop: Number(popStr), biz: Number(bizStr), income, tokens, status: statusNorm
+      };
+      territories.push(t);
 
-      tidToMetrics[id] = { title: `Territory${id}`, region: region ?? '', pop: Number(pop), biz: Number(biz), income };
+      tidToMetrics[id] = { title: `Territory ${id}`, region, pop: t.pop, biz: t.biz, income: t.income, status: t.status };
       tidToTokens[id] = tokens.slice();
+      tidToStatus[id] = t.status;
 
-      for (const code of exacts) codeToTidExact[code] = id;
+      for (const c of exacts) codeToTidExact[c] = id;
       for (const p of letterPrefixes) letterPrefixToTid.push({ prefix: p, tid: id });
       for (const p of anyPrefixes)    anyPrefixToTid.push({ prefix: p, tid: id });
     }
 
-    // Colour palette per territory
+    // --- Colour palette ---
     const palette = [
       '#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f',
       '#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ab'
@@ -165,24 +207,19 @@ map.on('style.load', async () => {
     const colourByTid: Record<string, string> = {};
     territories.forEach((t, i) => { colourByTid[t.id] = palette[i % palette.length]; });
 
-    // ===== Build colour expression (always returns a colour) =====
-    const CODE_U: any = ['upcase', ['get', codeProp]]; // compare uppercase codes
+    // ===== Colour expression (always returns a colour) =====
+    const CODE_U: any = ['upcase', ['get', codeProp]];
 
-    // (3) Any-prefix fallback (simple startsWith) -> default neutral grey
     function makeAnyExpr(): any {
       if (anyPrefixToTid.length === 0) return '#dddddd';
       const expr: any[] = ['case'];
       for (const { prefix, tid } of anyPrefixToTid) {
-        expr.push(
-          ['==', ['slice', CODE_U, 0, prefix.length], prefix],
-          colourByTid[tid] ?? '#cccccc'
-        );
+        expr.push(['==', ['slice', CODE_U, 0, prefix.length], prefix], colourByTid[tid] ?? '#cccccc');
       }
-      expr.push('#dddddd'); // default
+      expr.push('#dddddd');
       return expr;
     }
 
-    // (2) Letter-only prefixes: startsWith(prefix) AND (exact base OR next char is A–Z) -> fallback = anyExpr
     function makeLetterExpr(anyExpr: any): any {
       if (letterPrefixToTid.length === 0) return anyExpr;
       const expr: any[] = ['case'];
@@ -191,40 +228,82 @@ map.on('style.load', async () => {
           ['all',
             ['==', ['slice', CODE_U, 0, prefix.length], prefix],
             ['any',
-              ['==', ['length', CODE_U], prefix.length], // base district (e.g. "N1")
-              ['in', ['slice', CODE_U, prefix.length, prefix.length + 1], ['literal', AtoZ]] // next letter (e.g. "N1A")
+              ['==', ['length', CODE_U], prefix.length], // base (e.g. N1)
+              ['in', ['slice', CODE_U, prefix.length, prefix.length + 1], ['literal', AtoZ]] // next letter (N1A…)
             ]
           ],
           colourByTid[tid] ?? '#cccccc'
         );
       }
-      expr.push(anyExpr); // fallback
+      expr.push(anyExpr);
       return expr;
     }
 
     const anyExpr = makeAnyExpr();
     const letterExpr = makeLetterExpr(anyExpr);
 
-    // (1) Exact codes via 'match' -> fallback = letterExpr
     const exactPairs: any[] = [];
     for (const [code, tid] of Object.entries(codeToTidExact)) {
       exactPairs.push(code, colourByTid[tid] ?? '#cccccc');
     }
     const colorExpr: any[] =
-      exactPairs.length > 0
-        ? (['match', CODE_U, ...exactPairs, letterExpr] as any[])
-        : (letterExpr as any[]);
+      exactPairs.length > 0 ? (['match', CODE_U, ...exactPairs, letterExpr] as any[]) : (letterExpr as any[]);
+
+    // ===== Opacity expression (dim taken territories) =====
+    // Build boolean “is taken?” using the same precedence, then map to opacities.
+    function makeAnyTakenExpr(): any {
+      if (anyPrefixToTid.length === 0) return false;
+      const expr: any[] = ['case'];
+      for (const { prefix, tid } of anyPrefixToTid) {
+        expr.push(
+          ['==', ['slice', CODE_U, 0, prefix.length], prefix],
+          (tidToStatus[tid] === 'taken')
+        );
+      }
+      expr.push(false);
+      return expr;
+    }
+    function makeLetterTakenExpr(anyTakenExpr: any): any {
+      if (letterPrefixToTid.length === 0) return anyTakenExpr;
+      const expr: any[] = ['case'];
+      for (const { prefix, tid } of letterPrefixToTid) {
+        expr.push(
+          ['all',
+            ['==', ['slice', CODE_U, 0, prefix.length], prefix],
+            ['any',
+              ['==', ['length', CODE_U], prefix.length],
+              ['in', ['slice', CODE_U, prefix.length, prefix.length + 1], ['literal', AtoZ]]
+            ]
+          ],
+          (tidToStatus[tid] === 'taken')
+        );
+      }
+      expr.push(anyTakenExpr);
+      return expr;
+    }
+    const anyTakenExpr = makeAnyTakenExpr();
+    const letterTakenExpr = makeLetterTakenExpr(anyTakenExpr);
+
+    const exactTakenPairs: any[] = [];
+    for (const [code, tid] of Object.entries(codeToTidExact)) {
+      exactTakenPairs.push(code, (tidToStatus[tid] === 'taken'));
+    }
+    const isTakenExpr: any[] =
+      exactTakenPairs.length > 0 ? (['match', CODE_U, ...exactTakenPairs, letterTakenExpr] as any[]) : (letterTakenExpr as any[]);
+
+    const opacityExpr: any = ['case', isTakenExpr, 0.28, 0.68]; // taken => dim
 
     // Apply to all postcode fill layers
     for (const id of pcdFillLayerIds) {
       try {
         map.setPaintProperty(id, 'fill-color', colorExpr);
+        map.setPaintProperty(id, 'fill-opacity', opacityExpr);
       } catch (err) {
-        console.error(`Failed to set colour on ${id}`, err);
+        console.error(`Failed to set paint on ${id}`, err);
       }
     }
 
-    // ---- Click-only info: popup with metrics (no always-on labels) ----
+    // ---- Click-only popup ----
     const popup = new maplibregl.Popup({ closeOnClick: true, closeButton: true });
     for (const id of pcdFillLayerIds) {
       map.on('click', id, (e: any) => {
@@ -232,12 +311,10 @@ map.on('style.load', async () => {
         const code = (f.properties as any)?.[codeProp]?.toUpperCase();
         if (!code) return;
 
-        // Resolve territory: exact > letter+ (incl. base) > any*
         const tid =
           codeToTidExact[code] ??
           letterPrefixToTid.find(({ prefix }) =>
-            code.startsWith(prefix) &&
-            (code.length === prefix.length || LETTERS.includes(code[prefix.length] ?? ''))
+            code.startsWith(prefix) && (code.length === prefix.length || LETTERS.includes(code[prefix.length] ?? ''))
           )?.tid ??
           anyPrefixToTid.find(({ prefix }) => code.startsWith(prefix))?.tid;
 
@@ -257,8 +334,9 @@ map.on('style.load', async () => {
            Region: ${m.region}<br>
            ${postcodesLine}<br>
            Population: ${nf.format(m.pop)}<br>
-           Number of Businesses: ${nf.format(m.biz)}<br>
-           Income: ${m.income}`
+           Number of businesses: ${nf.format(m.biz)}<br>
+           Income: ${m.income}<br>
+           Status: ${m.status}`
         ).addTo(map);
       });
     }
@@ -269,12 +347,10 @@ map.on('style.load', async () => {
   }
 });
 
-// ---- Fallback: code-only popups if CSV missing ----
+// Fallback popups if CSV missing
 function wireCodeOnlyPopups() {
   const popup = new maplibregl.Popup({ closeOnClick: true, closeButton: true });
-  const layerIds = map.getStyle().layers
-    ?.map(l => l.id)
-    ?.filter(id => id.startsWith('pcd_') && id.endsWith('-fill')) ?? [];
+  const layerIds = map.getStyle().layers?.map(l => l.id)?.filter(id => id.startsWith('pcd_') && id.endsWith('-fill')) ?? [];
   for (const id of layerIds) {
     map.on('click', id, (e: any) => {
       const f = e.features?.[0]; if (!f) return;
@@ -284,9 +360,7 @@ function wireCodeOnlyPopups() {
   }
 }
 
-// ---- Resize safety ----
 map.once('load', () => { map.resize(); requestAnimationFrame(() => map.resize()); });
 window.addEventListener('resize', () => map.resize());
-
-// ---- Error logging ----
 map.on('error', (e) => console.error('Map error:', (e as any).error || e));
+
