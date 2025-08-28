@@ -3,7 +3,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
 import maplibregl from 'maplibre-gl';
 
-// ------- Base raster style (simple, reliable) -------
+// ------- Base raster style (simple & reliable) -------
 const rasterStyle = {
   version: 8 as const,
   glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
@@ -60,7 +60,7 @@ function detectDelimiter(text: string): string {
   return best && best[1] > 0 ? best[0] : ',';
 }
 
-// Robust CSV parser (quotes, embedded commas, UTF-8 BOM, \r\n)
+// Robust CSV parser (quotes, embedded commas, UTF-8 BOM, CRLF)
 function parseCSV(text: string): string[][] {
   if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
   const d = detectDelimiter(text);
@@ -94,86 +94,62 @@ map.on('style.load', async () => {
   const GB_BOUNDS: [[number, number], [number, number]] = [[-8.7, 49.8], [1.9, 60.9]];
   map.fitBounds(GB_BOUNDS, { padding: 8, animate: false });
 
-  // 1) Load postcode districts
-  // Prefer a single combined GeoJSON if present; otherwise load per-area via manifest.
-  const combined = await fetchJson<any>('/postcodes/districts.geojson');
+  // 1) Load postcode districts via manifest (no combined file path attempted)
   const pcdFillLayerIds: string[] = [];
   const codeProps = ['name','pcd','pcds','CODE','code','Postcode','Postcode_district','POSTCODE'] as const;
 
-  if (combined) {
-    if (!map.getSource('pcd_all')) {
-      map.addSource('pcd_all', { type: 'geojson', data: combined });
-    }
-    if (!map.getLayer('pcd_all-fill')) {
-      map.addLayer({
-        id: 'pcd_all-fill',
-        type: 'fill',
-        source: 'pcd_all',
-        paint: { 'fill-color': '#cccccc', 'fill-opacity': 0.68 }
-      });
-    }
-    pcdFillLayerIds.push('pcd_all-fill');
+  const manifest = await fetchJson<string[]>('/postcodes/_index.json');
+  const areas = manifest && manifest.length ? manifest : ['E','EC','N','NW','SE','SW','W','WC'];
 
-    if (!map.getLayer('pcd_all-line')) {
-      map.addLayer({
-        id: 'pcd_all-line',
-        type: 'line',
-        source: 'pcd_all',
-        paint: { 'line-color': '#555', 'line-width': 0.6 }
-      });
-    }
-
-    map.on('mouseenter', 'pcd_all-fill', () => (map.getCanvas().style.cursor = 'pointer'));
-    map.on('mouseleave', 'pcd_all-fill', () => (map.getCanvas().style.cursor = ''));
-  } else {
-    // Load many small files listed in manifest
-    const manifest = await fetchJson<string[]>('/postcodes/_index.json');
-    const areas = manifest && manifest.length ? manifest : ['E','EC','N','NW','SE','SW','W','WC'];
-    for (const a of areas) {
-      const srcId = `pcd_${a}`;
-      const url = `/postcodes/${a}.geojson`;
-      try {
-        if (!map.getSource(srcId)) {
-          map.addSource(srcId, { type: 'geojson', data: url });
-        }
-        const fillId = `${srcId}-fill`;
-        if (!map.getLayer(fillId)) {
-          map.addLayer({
-            id: fillId,
-            type: 'fill',
-            source: srcId,
-            paint: { 'fill-color': '#cccccc', 'fill-opacity': 0.68 }
-          });
-        }
-        pcdFillLayerIds.push(fillId);
-
-        const lineId = `${srcId}-line`;
-        if (!map.getLayer(lineId)) {
-          map.addLayer({
-            id: lineId,
-            type: 'line',
-            source: srcId,
-            paint: { 'line-color': '#555', 'line-width': 0.6 }
-          });
-        }
-        map.on('mouseenter', fillId, () => (map.getCanvas().style.cursor = 'pointer'));
-        map.on('mouseleave', fillId, () => (map.getCanvas().style.cursor = ''));
-      } catch (e) {
-        console.warn(`Skipped postcode area ${a}:`, e);
+  for (const a of areas) {
+    const srcId = `pcd_${a}`;
+    const url = `/postcodes/${a}.geojson`;
+    try {
+      if (!map.getSource(srcId)) {
+        map.addSource(srcId, { type: 'geojson', data: url });
       }
+      const fillId = `${srcId}-fill`;
+      if (!map.getLayer(fillId)) {
+        map.addLayer({
+          id: fillId,
+          type: 'fill',
+          source: srcId,
+          paint: { 'fill-color': '#cccccc', 'fill-opacity': 0.68 }
+        });
+      }
+      pcdFillLayerIds.push(fillId);
+
+      const lineId = `${srcId}-line`;
+      if (!map.getLayer(lineId)) {
+        map.addLayer({
+          id: lineId,
+          type: 'line',
+          source: srcId,
+          paint: { 'line-color': '#555', 'line-width': 0.6 }
+        });
+      }
+
+      map.on('mouseenter', fillId, () => (map.getCanvas().style.cursor = 'pointer'));
+      map.on('mouseleave', fillId, () => (map.getCanvas().style.cursor = ''));
+    } catch (e) {
+      console.warn(`Skipped postcode area ${a}:`, e);
     }
   }
 
-  // 2) Territories (CSV) -> colour + opacity, popup on click
+  // 2) Territories from CSV -> colour + opacity, popup on click
   try {
     const resp = await fetch('/territories.csv');
-    if (!resp.ok) { console.error('Failed to fetch /territories.csv:', resp.status); wireCodeOnlyPopups(); return; }
+    if (!resp.ok) {
+      console.error('Failed to fetch /territories.csv:', resp.status);
+      wireCodeOnlyPopups();
+      return;
+    }
 
     const raw = await resp.text();
     const rows = parseCSV(raw);
     if (rows.length < 2) { console.error('CSV appears empty.'); wireCodeOnlyPopups(); return; }
 
-    // Header row (unwrap if someone quoted the whole thing)
+    // Header row (unwrap if someone quoted the whole row)
     let headerRow = rows.shift()!;
     if (headerRow.length === 1 && /^".*"$/.test(headerRow[0]) && headerRow[0].includes(',')) {
       headerRow = headerRow[0].slice(1, -1).split(',');
@@ -184,7 +160,7 @@ map.on('style.load', async () => {
     const findCol = (aliases: string[], fallback = -1) =>
       aliases.map(a => cols.indexOf(a)).find(i => i >= 0) ?? fallback;
 
-    // Required + optional columns (various aliases tolerated)
+    // Required + optional columns (aliases tolerated)
     const iId  = findCol(['territoryid','id']);
     const iPfx = findCol(['postcodeprefixes','postcodes','prefixes']);
     const iReg = findCol(['region']);
@@ -212,7 +188,6 @@ map.on('style.load', async () => {
     const tidToTokens: Record<string, string[]> = {};
     const tidToStatus: Record<string, string> = {};
 
-    // helper
     const toNum = (s: string) => Number((s || '').replace(/[^\d.-]/g, '')) || 0;
 
     for (const parts of rows) {
@@ -228,7 +203,7 @@ map.on('style.load', async () => {
       const income = get(iInc);
       const status = (get(iSta) || 'available').toLowerCase();
 
-      // tokens in a single cell, pipe-separated
+      // tokens live in one cell, pipe-separated (fallback to ; if present)
       const tokens = pfxRaw.replace(/^"(.*)"$/, '$1')
         .split(pfxRaw.includes('|') ? '|' : pfxRaw.includes(';') ? ';' : '|')
         .map(s => s.trim().toUpperCase()).filter(Boolean);
@@ -269,7 +244,7 @@ map.on('style.load', async () => {
     territories.forEach((t, i) => { colourByTid[t.id] = palette[i % palette.length]; });
 
     // ===== Build expressions =====
-    // Coalesce several possible property names, then uppercase for matching
+    // Coalesce common property names then uppercase for matching
     const CODE_RAW: any =
       ['coalesce',
         ['get','name'],
@@ -380,8 +355,8 @@ map.on('style.load', async () => {
 
         // Resolve the district code from whichever prop is present, uppercase it
         const props = (f.properties || {}) as Record<string, any>;
-        const raw = codeProps.map(k => props[k]).find(v => v != null);
-        const code = String(raw || '').toUpperCase();
+        const rawCode = codeProps.map(k => props[k]).find(v => v != null);
+        const code = String(rawCode || '').toUpperCase();
         if (!code) { popup.setLngLat(e.lngLat).setHTML(`<strong>(unknown)</strong>`).addTo(map); return; }
 
         // Resolve territory: exact > letters-only (incl. base) > any
@@ -392,10 +367,7 @@ map.on('style.load', async () => {
         const tidAny = anyPrefixToTid.find(({ prefix }) => code.startsWith(prefix))?.tid;
         const tid = tidExact ?? tidLetters ?? tidAny;
 
-        if (!tid) {
-          popup.setLngLat(e.lngLat).setHTML(`<strong>${code}</strong>`).addTo(map);
-          return;
-        }
+        if (!tid) { popup.setLngLat(e.lngLat).setHTML(`<strong>${code}</strong>`).addTo(map); return; }
 
         const m = tidToMetrics[tid];
         const tokens = (tidToTokens[tid] || []);
@@ -435,9 +407,9 @@ function wireCodeOnlyPopups() {
   }
 }
 
-// Resize safety
+// Resize safety & error logging
 map.once('load', () => { map.resize(); requestAnimationFrame(() => map.resize()); });
 window.addEventListener('resize', () => map.resize());
-// Error logging
 map.on('error', (e) => console.error('Map error:', (e as any).error || e));
+
 
