@@ -3,7 +3,7 @@ import 'maplibre-gl/dist/maplibre-gl.css';
 import './style.css';
 import maplibregl from 'maplibre-gl';
 
-// ---- OSM raster basemap (glyphs harmless) ----
+// ---- OSM raster basemap ----
 const rasterStyle = {
   version: 8 as const,
   glyphs: 'https://demotiles.maplibre.org/font/{fontstack}/{range}.pbf',
@@ -26,6 +26,7 @@ const map = new maplibregl.Map({
   attributionControl: { compact: true }
 });
 
+// Expose for quick console checks
 ;(window as any).map = map;
 map.addControl(new maplibregl.NavigationControl(), 'top-right');
 
@@ -33,7 +34,78 @@ const nf = new Intl.NumberFormat('en-GB');
 const LETTERS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
 const AtoZ = LETTERS.split('');
 
-// Utility to fetch JSON (returns undefined on 404)
+// ---------- CSV utils (robust parser) ----------
+function detectDelimiter(text: string): string {
+  // Inspect first non-empty line outside quotes
+  const lines = text.split(/\r?\n/).filter(l => l.trim().length > 0);
+  if (!lines.length) return ',';
+  const line = lines[0];
+  let inQ = false, cComma = 0, cSemi = 0;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (ch === '"') {
+      if (inQ && line[i + 1] === '"') { i++; continue; }
+      inQ = !inQ;
+    } else if (!inQ) {
+      if (ch === ',') cComma++;
+      else if (ch === ';') cSemi++;
+    }
+  }
+  return cSemi > cComma ? ';' : ',';
+}
+
+function parseCSV(text: string): string[][] {
+  // strip UTF-8 BOM if present (Excel often adds it)
+  if (text.charCodeAt(0) === 0xFEFF) text = text.slice(1);
+  const delim = detectDelimiter(text);
+  const rows: string[][] = [];
+  let cur: string[] = [];
+  let field = '';
+  let inQ = false;
+
+  for (let i = 0; i < text.length; i++) {
+    const ch = text[i];
+
+    if (ch === '"') {
+      // Escaped quote inside quotes
+      if (inQ && text[i + 1] === '"') {
+        field += '"';
+        i++;
+      } else {
+        inQ = !inQ;
+      }
+      continue;
+    }
+
+    if (!inQ && (ch === delim)) {
+      cur.push(field);
+      field = '';
+      continue;
+    }
+
+    if (!inQ && (ch === '\n')) {
+      // Trim CR if present
+      if (field.endsWith('\r')) field = field.slice(0, -1);
+      cur.push(field);
+      rows.push(cur);
+      cur = [];
+      field = '';
+      continue;
+    }
+
+    field += ch;
+  }
+  // flush tail
+  if (field.endsWith('\r')) field = field.slice(0, -1);
+  cur.push(field);
+  // avoid trailing empty row when file ends with newline
+  if (!(cur.length === 1 && cur[0] === '')) rows.push(cur);
+  return rows;
+}
+
+const normaliseHeader = (s: string) => s.trim().toLowerCase().replace(/[\s_-]+/g, '');
+
+// ---------- Small helpers ----------
 async function fetchJson<T = any>(url: string): Promise<T | undefined> {
   try {
     const r = await fetch(url);
@@ -42,18 +114,17 @@ async function fetchJson<T = any>(url: string): Promise<T | undefined> {
   } catch { return undefined; }
 }
 
+// ---------- Main ----------
 map.on('style.load', async () => {
+  // Fit Great Britain
   const GB_BOUNDS: [[number, number], [number, number]] = [[-8.7, 49.8], [1.9, 60.9]];
   map.fitBounds(GB_BOUNDS, { padding: 8, animate: false });
 
-  // ---- 1) Load postcode areas dynamically via manifest ----
+  // 1) Load postcode areas from manifest (fallback to London set)
   const manifest = await fetchJson<string[]>('/postcodes/_index.json');
-  // Sensible fallback if manifest is missing
-  const areas = manifest && manifest.length > 0
-    ? manifest
-    : ['E','EC','N','NW','SE','SW','W','WC'];
+  const areas = manifest && manifest.length ? manifest : ['E','EC','N','NW','SE','SW','W','WC'];
 
-  const codeProp = 'name'; // district code property in your GeoJSONs
+  const codeProp = 'name'; // property in your GeoJSONs
   const pcdFillLayerIds: string[] = [];
 
   for (const a of areas) {
@@ -91,40 +162,52 @@ map.on('style.load', async () => {
     }
   }
 
-  // ---- 2) Territories: parse CSV (with status), colour + opacity, popup on click ----
+  // 2) Territories from CSV (robust parse + tolerant headers)
   try {
     const resp = await fetch('/territories.csv');
-    if (!resp.ok) { console.warn('territories.csv not found; keeping default grey.'); wireCodeOnlyPopups(); return; }
+    if (!resp.ok) {
+      console.error('Failed to fetch /territories.csv. Status:', resp.status);
+      wireCodeOnlyPopups();
+      return;
+    }
 
-    const text = await resp.text();
-    const lines = text.split(/\r?\n/).filter(Boolean);
-    if (lines.length === 0) { wireCodeOnlyPopups(); return; }
+    const raw = await resp.text();
+    const rows = parseCSV(raw).filter(r => r.some(v => v.trim() !== ''));
+    if (rows.length < 2) {
+      console.error('CSV appears empty or only header present.');
+      wireCodeOnlyPopups();
+      return;
+    }
 
-    // Header-aware parsing (tolerant of column order; expects required fields exist)
-    const header = lines.shift()!;
-    const cols = header.split(',').map(h => h.trim().toLowerCase());
+    const header = rows.shift()!;
+    const cols = header.map(normaliseHeader);
 
-    const idx = (names: string[], fallback = -1) =>
-      names.map(n => cols.indexOf(n)).find(i => i >= 0) ?? fallback;
+    // Column resolver (accept multiple aliases)
+    const idx = (aliases: string[], fallback = -1) =>
+      aliases.map(a => cols.indexOf(a)).find(i => i >= 0) ?? fallback;
 
-    const iId   = idx(['territory_id','id']);
-    const iReg  = idx(['region']);
-    const iPfx  = idx(['postcode_prefixes','postcodes','prefixes']);
-    const iPop  = idx(['estimated_population','population','pop']);
-    const iBiz  = idx(['indicative_business_count','businesses','biz','business_count']);
-    const iInc  = idx(['average_household_income','income','avg_income']);
-    const iStat = idx(['status']);
+    // Required
+    const iId  = idx(['territoryid','id']);
+    const iPfx = idx(['postcodeprefixes','postcodes','prefixes']);
+
+    // Optional / best-effort
+    const iReg = idx(['region']);
+    const iPop = idx(['estimatedpopulation','population','pop']);
+    const iBiz = idx(['indicativebusinesscount','businesses','biz','businesscount']);
+    const iInc = idx(['averagehouseholdincome','income','avgincome']);
+    const iSta = idx(['status']);
 
     if (iId < 0 || iPfx < 0) {
-      console.error('CSV is missing required columns (territory_id and postcode_prefixes).');
-      wireCodeOnlyPopups(); return;
+      console.error('CSV is missing required columns (territory_id and postcode_prefixes). Header seen:', header);
+      wireCodeOnlyPopups();
+      return;
     }
 
     type Terr = {
       id: string; region: string;
       exacts: string[]; letterPrefixes: string[]; anyPrefixes: string[];
-      pop: number; biz: number; income: string;
-      tokens: string[]; status: 'available'|'taken'|string;
+      pop: number; biz: number; income: string; status: string;
+      tokens: string[];
     };
 
     const territories: Terr[] = [];
@@ -135,58 +218,42 @@ map.on('style.load', async () => {
     const tidToTokens: Record<string, string[]> = {};
     const tidToStatus: Record<string, string> = {};
 
-    for (const raw of lines) {
-      const parts = raw.split(',');
-      const id  = (parts[iId]  ?? '').trim();
+    // Parse rows safely (some fields may be missing)
+    for (const parts of rows) {
+      const get = (i: number) => (i >= 0 && i < parts.length ? parts[i].trim() : '');
+
+      const id = get(iId);
       if (!id) continue;
 
-      const region = (parts[iReg] ?? '').trim();
-      const pfxRaw = (parts[iPfx] ?? '').trim();
+      const region = get(iReg);
+      const pfxRaw = get(iPfx);
+      const popStr = get(iPop);
+      const bizStr = get(iBiz);
+      const income = get(iInc);
+      const status = (get(iSta) || 'available').toLowerCase();
 
-      // Because income often has commas, treat "everything after iBiz" as tail, then split last for status
-      const popStr = iPop >= 0 ? (parts[iPop] ?? '').trim() : '';
-      const bizStr = iBiz >= 0 ? (parts[iBiz] ?? '').trim() : '';
-      let incomeAndStatus = '';
-      if (iInc >= 0) {
-        incomeAndStatus = parts.slice(iInc).join(',').trim();
-      } else if (iBiz >= 0) {
-        incomeAndStatus = parts.slice(iBiz + 1).join(',').trim();
-      }
-
-      let income = '';
-      let status = (iStat >= 0 ? (parts[iStat] ?? '').trim() : '');
-      if (!status && incomeAndStatus) {
-        const lastComma = incomeAndStatus.lastIndexOf(',');
-        if (iStat >= 0 && lastComma >= 0) {
-          income = incomeAndStatus.slice(0, lastComma).trim();
-          status = incomeAndStatus.slice(lastComma + 1).trim();
-        } else {
-          income = incomeAndStatus;
-        }
-      } else if (!income && iInc >= 0) {
-        income = (parts[iInc] ?? '').trim();
-      }
-
-      if (!status) status = 'available';
-      const statusNorm = status.toLowerCase();
-
-      // Strip optional quotes around tokens and split on |
-      const pfx = pfxRaw.replace(/^"(.*)"$/, '$1');
-      const tokens = pfx.split('|').map(s => s.trim().toUpperCase()).filter(Boolean);
+      // tokens are pipe-separated, possibly quoted
+      const tokens = pfxRaw.replace(/^"(.*)"$/,'$1').split('|').map(s => s.trim().toUpperCase()).filter(Boolean);
 
       const exacts: string[] = [];
       const letterPrefixes: string[] = [];
       const anyPrefixes: string[] = [];
-
       for (const tok of tokens) {
-        if (tok.endsWith('+'))       letterPrefixes.push(tok.slice(0, -1));  // 'W1+'=> 'W1' (letters-only incl. base)
-        else if (tok.endsWith('*'))  anyPrefixes.push(tok.slice(0, -1));     // 'EC1*'=>'EC1' (any continuation)
-        else                         exacts.push(tok);                        // exact district
+        if (tok.endsWith('+'))       letterPrefixes.push(tok.slice(0, -1));  // letters-only incl. base
+        else if (tok.endsWith('*'))  anyPrefixes.push(tok.slice(0, -1));     // any continuation
+        else                         exacts.push(tok);                        // exact
       }
 
+      const num = (s: string) => Number((s || '').replace(/[^\d.-]/g, '')) || 0;
+
       const t: Terr = {
-        id, region, exacts, letterPrefixes, anyPrefixes,
-        pop: Number(popStr), biz: Number(bizStr), income, tokens, status: statusNorm
+        id, region,
+        exacts, letterPrefixes, anyPrefixes,
+        pop: num(popStr),
+        biz: num(bizStr),
+        income,
+        status,
+        tokens
       };
       territories.push(t);
 
@@ -199,7 +266,7 @@ map.on('style.load', async () => {
       for (const p of anyPrefixes)    anyPrefixToTid.push({ prefix: p, tid: id });
     }
 
-    // --- Colour palette ---
+    // Palette
     const palette = [
       '#4e79a7','#f28e2b','#e15759','#76b7b2','#59a14f',
       '#edc948','#b07aa1','#ff9da7','#9c755f','#bab0ab'
@@ -207,7 +274,7 @@ map.on('style.load', async () => {
     const colourByTid: Record<string, string> = {};
     territories.forEach((t, i) => { colourByTid[t.id] = palette[i % palette.length]; });
 
-    // ===== Colour expression (always returns a colour) =====
+    // === Colour expression ===
     const CODE_U: any = ['upcase', ['get', codeProp]];
 
     function makeAnyExpr(): any {
@@ -228,8 +295,8 @@ map.on('style.load', async () => {
           ['all',
             ['==', ['slice', CODE_U, 0, prefix.length], prefix],
             ['any',
-              ['==', ['length', CODE_U], prefix.length], // base (e.g. N1)
-              ['in', ['slice', CODE_U, prefix.length, prefix.length + 1], ['literal', AtoZ]] // next letter (N1A…)
+              ['==', ['length', CODE_U], prefix.length], // base (e.g. "N1")
+              ['in', ['slice', CODE_U, prefix.length, prefix.length + 1], ['literal', AtoZ]] // "N1A…"
             ]
           ],
           colourByTid[tid] ?? '#cccccc'
@@ -249,16 +316,12 @@ map.on('style.load', async () => {
     const colorExpr: any[] =
       exactPairs.length > 0 ? (['match', CODE_U, ...exactPairs, letterExpr] as any[]) : (letterExpr as any[]);
 
-    // ===== Opacity expression (dim taken territories) =====
-    // Build boolean “is taken?” using the same precedence, then map to opacities.
+    // === Opacity (dim "taken") ===
     function makeAnyTakenExpr(): any {
       if (anyPrefixToTid.length === 0) return false;
       const expr: any[] = ['case'];
       for (const { prefix, tid } of anyPrefixToTid) {
-        expr.push(
-          ['==', ['slice', CODE_U, 0, prefix.length], prefix],
-          (tidToStatus[tid] === 'taken')
-        );
+        expr.push(['==', ['slice', CODE_U, 0, prefix.length], prefix], (tidToStatus[tid] === 'taken'));
       }
       expr.push(false);
       return expr;
@@ -290,8 +353,7 @@ map.on('style.load', async () => {
     }
     const isTakenExpr: any[] =
       exactTakenPairs.length > 0 ? (['match', CODE_U, ...exactTakenPairs, letterTakenExpr] as any[]) : (letterTakenExpr as any[]);
-
-    const opacityExpr: any = ['case', isTakenExpr, 0.28, 0.68]; // taken => dim
+    const opacityExpr: any = ['case', isTakenExpr, 0.28, 0.68];
 
     // Apply to all postcode fill layers
     for (const id of pcdFillLayerIds) {
@@ -303,7 +365,7 @@ map.on('style.load', async () => {
       }
     }
 
-    // ---- Click-only popup ----
+    // Click-only popup
     const popup = new maplibregl.Popup({ closeOnClick: true, closeButton: true });
     for (const id of pcdFillLayerIds) {
       map.on('click', id, (e: any) => {
@@ -312,11 +374,11 @@ map.on('style.load', async () => {
         if (!code) return;
 
         const tid =
-          codeToTidExact[code] ??
-          letterPrefixToTid.find(({ prefix }) =>
+          (codeToTidExact[code]) ??
+          (letterPrefixToTid.find(({ prefix }) =>
             code.startsWith(prefix) && (code.length === prefix.length || LETTERS.includes(code[prefix.length] ?? ''))
-          )?.tid ??
-          anyPrefixToTid.find(({ prefix }) => code.startsWith(prefix))?.tid;
+          )?.tid) ??
+          (anyPrefixToTid.find(({ prefix }) => code.startsWith(prefix))?.tid);
 
         if (!tid) {
           popup.setLngLat(e.lngLat).setHTML(`<strong>${code}</strong>`).addTo(map);
@@ -347,7 +409,7 @@ map.on('style.load', async () => {
   }
 });
 
-// Fallback popups if CSV missing
+// Fallback: code-only popups
 function wireCodeOnlyPopups() {
   const popup = new maplibregl.Popup({ closeOnClick: true, closeButton: true });
   const layerIds = map.getStyle().layers?.map(l => l.id)?.filter(id => id.startsWith('pcd_') && id.endsWith('-fill')) ?? [];
